@@ -1,16 +1,27 @@
 # routes/bible.py
 from flask import Blueprint, jsonify, request
 from models.bible import BibleVerse
+import logging
 
 bible_bp = Blueprint('bible', __name__)
 
 @bible_bp.route('/books', methods=['GET'])
 def get_books():
     try:
-        print("Fetching books from database...")
-        # Get unique book names and sort them in biblical order
+        logger.info("Attempting to fetch books from database")
+        # Log MongoDB connection info (without sensitive data)
+        logger.info(f"MongoDB connection status: {BibleVerse._get_db().client.is_primary}")
+        
+        # Get unique book names
         books = BibleVerse.objects().distinct('book_name')
-        print(f"Found {len(books)} books: {books}")
+        logger.info(f"Found {len(books)} books in database")
+        
+        if not books:
+            logger.warning("No books found in database")
+            return jsonify([])
+        
+        # Log the first few books to verify data
+        logger.info(f"Sample of books found: {books[:5]}")
         
         # Sort books in biblical order (Old Testament first, then New Testament)
         biblical_order = [
@@ -38,7 +49,7 @@ def get_books():
         
         return jsonify(sorted_books)
     except Exception as e:
-        print(f"Error in get_books: {str(e)}")
+        logger.error(f"Error in get_books: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @bible_bp.route('/chapters/<book>', methods=['GET'])
