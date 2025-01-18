@@ -1,8 +1,6 @@
-# database.py
-from mongoengine import connect, get_db
+from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
-import certifi
 import logging
 import ssl
 
@@ -19,25 +17,18 @@ def init_db():
         
         logger.info("Connecting to MongoDB...")
         
-        # Connect with explicit TLS/SSL settings
-        connect(
-            host=mongodb_uri,
-            ssl=True,
-            ssl_cert_reqs=ssl.CERT_REQUIRED,
-            ssl_ca_certs=certifi.where(),
-            tlsAllowInvalidCertificates=False,  # Ensure strict certificate validation
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=5000
+        # Create client with minimal SSL config
+        client = MongoClient(
+            mongodb_uri,
+            tls=True,
+            tlsAllowInvalidCertificates=True  # For testing only
         )
         
         # Test connection
-        db = get_db()
-        db.client.server_info()
-        
+        client.admin.command('ping')
         logger.info("Successfully connected to MongoDB Atlas")
-        return True
+        return client
         
     except Exception as e:
         logger.error(f"Error connecting to MongoDB: {str(e)}")
-        return False
+        return None
