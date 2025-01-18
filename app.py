@@ -8,6 +8,8 @@ from routes.notes import notes_bp
 from database import init_db
 from dotenv import load_dotenv
 import os
+import logging
+import time
 
 # Load environment variables
 load_dotenv()
