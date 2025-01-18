@@ -4,12 +4,11 @@ from dotenv import load_dotenv
 import os
 import certifi
 import logging
+import ssl
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 
 def init_db():
@@ -20,24 +19,25 @@ def init_db():
         
         logger.info("Connecting to MongoDB...")
         
-        # Connect with timeout settings
+        # Connect with explicit TLS/SSL settings
         connect(
             host=mongodb_uri,
             ssl=True,
-            tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=5000,  # 5 second timeout for server selection
-            connectTimeoutMS=5000,          # 5 second timeout for initial connection
-            socketTimeoutMS=5000            # 5 second timeout for socket operations
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+            ssl_ca_certs=certifi.where(),
+            tlsAllowInvalidCertificates=False,  # Ensure strict certificate validation
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000
         )
         
-        # Test connection immediately
+        # Test connection
         db = get_db()
-        db.client.server_info()  # This will raise an exception if connection fails
+        db.client.server_info()
         
         logger.info("Successfully connected to MongoDB Atlas")
         return True
         
     except Exception as e:
         logger.error(f"Error connecting to MongoDB: {str(e)}")
-        # Don't raise the error, just return False
         return False
