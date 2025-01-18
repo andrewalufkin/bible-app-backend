@@ -2,7 +2,6 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
 import logging
-import ssl
 import certifi
 
 logging.basicConfig(level=logging.INFO)
@@ -18,13 +17,10 @@ def init_db():
         
         logger.info("Connecting to MongoDB...")
         
-        # Create client with more explicit SSL config
+        # Simplify the connection options and use Atlas's recommended setup
         client = MongoClient(
             mongodb_uri,
-            tls=True,
-            tlsCAFile=certifi.where(),  # Add this line
-            ssl_cert_reqs=ssl.CERT_REQUIRED,
-            serverSelectionTimeoutMS=5000
+            tlsCAFile=certifi.where()
         )
         
         # Test connection
