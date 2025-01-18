@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import os
 import logging
 import time
+import sys
 
 # Configure logging to output to stdout
 logging.basicConfig(
