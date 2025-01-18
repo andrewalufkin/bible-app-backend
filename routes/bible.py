@@ -5,6 +5,14 @@ import logging
 
 bible_bp = Blueprint('bible', __name__)
 
+# Configure logging to output to stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 @bible_bp.route('/books', methods=['GET'])
 def get_books():
     try:
