@@ -21,7 +21,7 @@ def init_db():
         client = MongoClient(
             mongodb_uri,
             tls=True,
-            tlsAllowInvalidCertificates=True  # For testing only
+            tlsAllowInvalidCertificates=False  
         )
         
         # Test connection
