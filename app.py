@@ -11,6 +11,8 @@ import os
 import logging
 import time
 import sys
+from mongoengine import connect
+import certifi
 
 # Configure logging to output to stdout
 logging.basicConfig(
@@ -38,9 +40,10 @@ CORS(app, resources={
 # Ensure URLs with or without trailing slashes are handled the same way
 app.url_map.strict_slashes = False
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize MongoDB connection with MongoEngine
+mongodb_uri = os.getenv('MONGODB_URI')
+if not mongodb_uri:
+    raise ValueError("MONGODB_URI not found in environment variables")
 
 # Try to connect to the database with retries
 MAX_RETRIES = 3
@@ -49,11 +52,14 @@ RETRY_DELAY = 5  # seconds
 for attempt in range(MAX_RETRIES):
     try:
         logger.info(f"Database connection attempt {attempt + 1}/{MAX_RETRIES}")
-        if init_db():
-            logger.info("Database connection successful")
-            break
-        else:
-            logger.error(f"Failed to connect to database (attempt {attempt + 1}/{MAX_RETRIES})")
+        # Connect using MongoEngine
+        connect(
+            host=mongodb_uri,
+            tlsCAFile=certifi.where(),
+            alias='default'  # This sets up the default connection
+        )
+        logger.info("Successfully connected to MongoDB Atlas")
+        break
     except Exception as e:
         logger.error(f"Error during database connection: {str(e)}")
         if attempt < MAX_RETRIES - 1:
@@ -61,6 +67,7 @@ for attempt in range(MAX_RETRIES):
             time.sleep(RETRY_DELAY)
         else:
             logger.error("Max retries reached. Starting app without database connection.")
+            raise
 
 # Register blueprints
 app.register_blueprint(bible_bp, url_prefix='/api/bible')
