@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import os
 import logging
 import ssl
+import certifi
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,11 +18,13 @@ def init_db():
         
         logger.info("Connecting to MongoDB...")
         
-        # Create client with minimal SSL config
+        # Create client with more explicit SSL config
         client = MongoClient(
             mongodb_uri,
             tls=True,
-            tlsAllowInvalidCertificates=False  
+            tlsCAFile=certifi.where(),  # Add this line
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+            serverSelectionTimeoutMS=5000
         )
         
         # Test connection
