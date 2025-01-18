@@ -2,6 +2,7 @@
 from flask import Blueprint, jsonify, request
 from models.bible import BibleVerse
 import logging
+import sys
 
 bible_bp = Blueprint('bible', __name__)
 
