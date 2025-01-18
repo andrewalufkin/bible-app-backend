@@ -27,8 +27,29 @@ CORS(app, resources={
 # Ensure URLs with or without trailing slashes are handled the same way
 app.url_map.strict_slashes = False
 
-# Initialize database connection
-init_db()
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Try to connect to the database with retries
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
+
+for attempt in range(MAX_RETRIES):
+    try:
+        logger.info(f"Database connection attempt {attempt + 1}/{MAX_RETRIES}")
+        if init_db():
+            logger.info("Database connection successful")
+            break
+        else:
+            logger.error(f"Failed to connect to database (attempt {attempt + 1}/{MAX_RETRIES})")
+    except Exception as e:
+        logger.error(f"Error during database connection: {str(e)}")
+        if attempt < MAX_RETRIES - 1:
+            logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+            time.sleep(RETRY_DELAY)
+        else:
+            logger.error("Max retries reached. Starting app without database connection.")
 
 # Register blueprints
 app.register_blueprint(bible_bp, url_prefix='/api/bible')
