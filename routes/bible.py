@@ -102,7 +102,7 @@ def get_verses(book, chapter):
 
 @bible_bp.route('/search', methods=['GET'])
 @token_required
-def search_bible():
+def search_bible(current_user):
     try:
         query = request.args.get('q', '')
         if not query:
@@ -113,6 +113,7 @@ def search_bible():
         return jsonify(results)
         
     except Exception as e:
+        logger.error(f"Search error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @bible_bp.route('/verse/<book>/<int:chapter>/<int:verse>', methods=['GET'])
