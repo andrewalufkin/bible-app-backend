@@ -14,7 +14,7 @@ class BibleVerse(Document):
             ('book_name', 'chapter'),
             ('book_name', 'chapter', 'verse'),
             {
-                'fields': ['$text'],
+                'fields': [('text', 'text')],
                 'default_language': 'english'
             }
         ]
