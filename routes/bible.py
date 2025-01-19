@@ -3,8 +3,12 @@ from flask import Blueprint, jsonify, request
 from models.bible import BibleVerse
 import logging
 import sys
+from database import get_db_connection
+from utils.auth import token_required
+from utils.search import BibleSearchEngine
 
 bible_bp = Blueprint('bible', __name__)
+search_engine = BibleSearchEngine()
 
 # Configure logging to output to stdout
 logging.basicConfig(
@@ -98,31 +102,19 @@ def get_verses(book, chapter):
         return jsonify({"error": str(e)}), 500
 
 @bible_bp.route('/search', methods=['GET'])
-def search_verses():
-    query = request.args.get('q', '').strip()
-    if not query:
-        return jsonify({"error": "Search query is required"}), 400
-        
+@token_required
+def search_bible():
     try:
-        # Search verses containing the query text (case-insensitive)
-        verses = BibleVerse.objects(
-            text__icontains=query
-        ).limit(50).order_by('book_name', 'chapter', 'verse')
+        query = request.args.get('q', '')
+        if not query:
+            return jsonify([])
+            
+        # Get search results using the search engine
+        results = search_engine.search(query)
+        return jsonify(results)
         
-        results = [{
-            "id": str(verse.id),
-            "book": verse.book_name,
-            "chapter": verse.chapter,
-            "verse": verse.verse,
-            "text": verse.text
-        } for verse in verses]
-        
-        return jsonify({
-            "count": len(results),
-            "results": results
-        })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 @bible_bp.route('/verse/<book>/<int:chapter>/<int:verse>', methods=['GET'])
 def get_single_verse(book, chapter, verse):
