@@ -104,10 +104,12 @@ def search_verses():
         return jsonify({"error": "Search query is required"}), 400
         
     try:
-        # Search verses containing the query text (case-insensitive)
-        verses = BibleVerse.objects(
-            text__icontains=query
-        ).limit(50).order_by('book_name', 'chapter', 'verse')
+        # Use MongoDB's text search with scoring
+        verses = BibleVerse.objects.search_text(query).order_by('$text_score')
+        
+        # If no results found with text search, fallback to case-insensitive contains
+        if not verses:
+            verses = BibleVerse.objects(text__icontains=query).limit(50)
         
         results = [{
             "id": str(verse.id),
@@ -117,11 +119,9 @@ def search_verses():
             "text": verse.text
         } for verse in verses]
         
-        return jsonify({
-            "count": len(results),
-            "results": results
-        })
+        return jsonify(results)
     except Exception as e:
+        print(f"Search error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @bible_bp.route('/verse/<book>/<int:chapter>/<int:verse>', methods=['GET'])

@@ -8,7 +8,7 @@ class BibleVerse(Document):
     translation = StringField(default='KJV')
 
     meta = {
-        'collection': 'verses',
+        'collection': 'bible_verses',
         'indexes': [
             'book_name',
             ('book_name', 'chapter'),
