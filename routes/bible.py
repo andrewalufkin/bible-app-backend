@@ -77,51 +77,52 @@ def get_chapters(book):
 @bible_bp.route('/verses/<book>/<int:chapter>', methods=['GET'])
 def get_verses(book, chapter):
     try:
-        print(f"Fetching verses for {book} chapter {chapter}")
-        
-        # First check if the book exists
-        if not BibleVerse.objects(book_name=book).first():
-            print(f"Book not found: {book}")
-            return jsonify({"error": f"Book '{book}' not found"}), 404
-            
-        # Then check if the chapter exists
+        # Validate book and chapter exist
         if not BibleVerse.objects(book_name=book, chapter=chapter).first():
-            print(f"Chapter {chapter} not found in {book}")
-            return jsonify({"error": f"Chapter {chapter} not found in {book}"}), 404
+            return jsonify({"error": "Chapter not found"}), 404
             
-        verses = BibleVerse.objects(book_name=book, chapter=chapter).order_by('verse')
-        results = [verse.to_json() for verse in verses]
+        # Get all verses for the given book and chapter
+        verses = BibleVerse.objects(
+            book_name=book,
+            chapter=chapter
+        ).order_by('verse')
         
-        print(f"Found {len(results)} verses")
-        return jsonify(results)
+        return jsonify([{
+            "id": str(verse.id),
+            "book": verse.book_name,
+            "chapter": verse.chapter,
+            "verse": verse.verse,
+            "text": verse.text
+        } for verse in verses])
     except Exception as e:
-        print(f"Error fetching verses: {str(e)}")
-        return jsonify({"error": "Failed to fetch verses"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @bible_bp.route('/search', methods=['GET'])
 def search_verses():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({"error": "Search query is required"}), 400
+        
     try:
-        query = request.args.get('q')
-        if not query:
-            return jsonify({"error": "No search query provided"}), 400
-
-        print(f"Searching for: {query}")
+        # Search verses containing the query text (case-insensitive)
+        verses = BibleVerse.objects(
+            text__icontains=query
+        ).limit(50).order_by('book_name', 'chapter', 'verse')
         
-        # Try text search first
-        verses = BibleVerse.objects.search_text(query).order_by('-text_score')
-        results = [verse.to_json() for verse in verses]
+        results = [{
+            "id": str(verse.id),
+            "book": verse.book_name,
+            "chapter": verse.chapter,
+            "verse": verse.verse,
+            "text": verse.text
+        } for verse in verses]
         
-        # If no results found, try a case-insensitive contains search
-        if not results:
-            print("No text search results, trying contains search")
-            verses = BibleVerse.objects(text__icontains=query).limit(50)
-            results = [verse.to_json() for verse in verses]
-        
-        print(f"Found {len(results)} results")
-        return jsonify(results)
+        return jsonify({
+            "count": len(results),
+            "results": results
+        })
     except Exception as e:
-        print(f"Error in search: {str(e)}")
-        return jsonify({"error": "Failed to perform search"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @bible_bp.route('/verse/<book>/<int:chapter>/<int:verse>', methods=['GET'])
 def get_single_verse(book, chapter, verse):
