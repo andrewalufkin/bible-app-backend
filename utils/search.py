@@ -1,6 +1,7 @@
 # utils/search.py
 from collections import Counter
 import re
+from models.bible import BibleVerse
 
 class BibleSearchEngine:
     def __init__(self):
@@ -33,61 +34,64 @@ class BibleSearchEngine:
     
     def text_search(self, query, limit=10):
         """Perform text search with support for exact phrases"""
-        from database import get_db_connection
-        
         # Clean the query
         query = query.strip()
         exact_phrase = query.lower() if ' ' in query else None
         query_tokens = self.tokenize(query)
         results = []
         
-        conn = get_db_connection()
         try:
             # First, try exact phrase matching
             if exact_phrase:
-                exact_matches = conn.execute('''
-                    SELECT v.*, b.name as book_name
-                    FROM verses v
-                    JOIN books b ON v.book_id = b.id
-                    WHERE LOWER(v.text) LIKE ?
-                ''', [f'%{exact_phrase}%']).fetchall()
+                # Use MongoDB's text search capabilities
+                exact_matches = BibleVerse.objects(text__icontains=exact_phrase)
                 
                 for verse in exact_matches:
-                    verse_dict = dict(verse)
-                    verse_dict['score'] = 1.0  # Highest score for exact matches
-                    results.append(verse_dict)
+                    results.append({
+                        'id': str(verse.id),
+                        'book_name': verse.book_name,
+                        'chapter': verse.chapter,
+                        'verse': verse.verse,
+                        'text': verse.text,
+                        'score': 1.0  # Highest score for exact matches
+                    })
 
             # If we don't have enough results, try word-based matching
             if len(results) < limit:
-                like_conditions = ' OR '.join(['LOWER(v.text) LIKE ?' for _ in query_tokens])
-                params = [f'%{token.lower()}%' for token in query_tokens]
+                # Create OR conditions for each token
+                word_conditions = []
+                for token in query_tokens:
+                    word_conditions.append({'text__icontains': token})
                 
-                word_matches = conn.execute(f'''
-                    SELECT v.*, b.name as book_name
-                    FROM verses v
-                    JOIN books b ON v.book_id = b.id
-                    WHERE {like_conditions}
-                ''', params).fetchall()
-                
-                # Score each verse
-                for verse in word_matches:
-                    # Skip if we already have this verse from exact matching
-                    if any(r['id'] == verse['id'] for r in results):
-                        continue
+                if word_conditions:
+                    word_matches = BibleVerse.objects(__raw__={'$or': word_conditions})
+                    
+                    # Score each verse
+                    for verse in word_matches:
+                        # Skip if we already have this verse from exact matching
+                        if any(r['id'] == str(verse.id) for r in results):
+                            continue
+                            
+                        verse_tokens = self.tokenize(verse.text)
+                        score = self.calculate_similarity(query_tokens, verse_tokens, exact_phrase)
                         
-                    verse_tokens = self.tokenize(verse['text'])
-                    score = self.calculate_similarity(query_tokens, verse_tokens, exact_phrase)
-                    if score > 0:
-                        verse_dict = dict(verse)
-                        verse_dict['score'] = score
-                        results.append(verse_dict)
+                        if score > 0:
+                            results.append({
+                                'id': str(verse.id),
+                                'book_name': verse.book_name,
+                                'chapter': verse.chapter,
+                                'verse': verse.verse,
+                                'text': verse.text,
+                                'score': score
+                            })
             
             # Sort by score and return top results
             results.sort(key=lambda x: x['score'], reverse=True)
             return results[:limit]
             
-        finally:
-            conn.close()
+        except Exception as e:
+            print(f"Search error: {str(e)}")
+            return []
     
     def search(self, query, limit=10):
         """Main search method"""
