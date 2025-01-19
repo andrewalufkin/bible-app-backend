@@ -3,7 +3,6 @@ from flask import Blueprint, jsonify, request
 from models.bible import BibleVerse
 import logging
 import sys
-from database import get_db_connection
 from utils.auth import token_required
 from utils.search import BibleSearchEngine
 
