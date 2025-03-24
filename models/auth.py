@@ -1,7 +1,8 @@
 from mongoengine import Document, StringField, BooleanField, ListField, ReferenceField, EmbeddedDocument, EmbeddedDocumentField, DateTimeField, ObjectIdField
-from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 from bson import ObjectId
+import bcrypt
+import re
 
 class FriendRequest(EmbeddedDocument):
     request_id = ObjectIdField(default=lambda: ObjectId(), required=True)
@@ -41,10 +42,31 @@ class AuthUser(Document):
     }
     
     def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        self.password_hash = hashed.decode('utf-8')
         
     def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
+        # First try bcrypt
+        try:
+            if bcrypt.checkpw(password.encode('utf-8'), self.password_hash.encode('utf-8')):
+                return True
+        except Exception:
+            pass  # Not a bcrypt hash, try legacy method next
+            
+        # Check if it's a Werkzeug hash (pbkdf2:sha256:...)
+        if self.password_hash.startswith(('pbkdf2:', 'scrypt:')):
+            try:
+                from werkzeug.security import check_password_hash
+                if check_password_hash(self.password_hash, password):
+                    # Migrate to bcrypt
+                    self.set_password(password)
+                    self.save()
+                    return True
+            except Exception:
+                pass
+                
+        return False
         
     def to_json(self):
         return {
