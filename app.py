@@ -27,6 +27,14 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
+
+# Increase limits to avoid any truncation issues
+app.json.sort_keys = False  # Preserve order of keys in JSON responses
+app.json.compact = False    # Ensure proper formatting
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request/response size
+app.config['JSON_MAX_CONTENT_LENGTH'] = None  # No limit on JSON size
+app.config['MAX_COOKIE_SIZE'] = 16384  # Set a large cookie size
+app.config['APPLICATION_ROOT'] = '/'  # Set application root
 CORS(app, resources={
     r"/api/*": {
         "origins": "*",

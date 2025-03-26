@@ -143,3 +143,44 @@ def update_note_settings(current_user):
     except Exception as e:
         print(f"Error updating note settings: {str(e)}")
         return jsonify({'message': 'Failed to update note settings'}), 500
+
+@auth_bp.route('/settings/ai', methods=['POST'])
+@token_required
+def update_ai_preferences(current_user):
+    try:
+        data = request.get_json()
+        
+        # Update AI preferences if provided
+        if 'model_temperature' in data:
+            current_user.ai_preferences.model_temperature = data['model_temperature']
+            
+        if 'response_length' in data:
+            current_user.ai_preferences.response_length = data['response_length']
+            
+        if 'writing_style' in data:
+            current_user.ai_preferences.writing_style = data['writing_style']
+            
+        if 'preferred_topics' in data:
+            current_user.ai_preferences.preferred_topics = data['preferred_topics']
+            
+        if 'challenge_level' in data:
+            current_user.ai_preferences.challenge_level = data['challenge_level']
+            
+        if 'depth_level' in data:
+            current_user.ai_preferences.depth_level = data['depth_level']
+            
+        if 'time_orientation' in data:
+            current_user.ai_preferences.time_orientation = data['time_orientation']
+            
+        if 'user_context' in data:
+            current_user.ai_preferences.user_context = data['user_context']
+            
+        current_user.save()
+        
+        return jsonify({
+            'message': 'AI preferences updated successfully',
+            'ai_preferences': current_user.ai_preferences.to_json()
+        })
+    except Exception as e:
+        print(f"Error updating AI preferences: {str(e)}")
+        return jsonify({'message': 'Failed to update AI preferences'}), 500

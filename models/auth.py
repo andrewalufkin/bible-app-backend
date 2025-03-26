@@ -1,4 +1,4 @@
-from mongoengine import Document, StringField, BooleanField, ListField, ReferenceField, EmbeddedDocument, EmbeddedDocumentField, DateTimeField, ObjectIdField
+from mongoengine import Document, StringField, BooleanField, ListField, ReferenceField, EmbeddedDocument, EmbeddedDocumentField, DateTimeField, ObjectIdField, IntField, FloatField, DictField
 from datetime import datetime
 from bson import ObjectId
 import bcrypt
@@ -26,6 +26,28 @@ class FriendRequest(EmbeddedDocument):
     def __hash__(self):
         return hash(str(self.request_id))
 
+class AIPreferences(EmbeddedDocument):
+    model_temperature = FloatField(default=0.7, min_value=0, max_value=1)
+    response_length = IntField(default=200, min_value=50, max_value=500)
+    writing_style = StringField(choices=['academic', 'casual', 'devotional'], default='devotional')
+    preferred_topics = ListField(StringField(), default=list)
+    challenge_level = FloatField(default=0.5, min_value=0, max_value=1)
+    depth_level = StringField(choices=['beginner', 'intermediate', 'scholarly'], default='intermediate')
+    time_orientation = FloatField(default=0.5, min_value=0, max_value=1)
+    user_context = DictField(default=dict)
+    
+    def to_json(self):
+        return {
+            "model_temperature": self.model_temperature,
+            "response_length": self.response_length,
+            "writing_style": self.writing_style,
+            "preferred_topics": self.preferred_topics,
+            "challenge_level": self.challenge_level,
+            "depth_level": self.depth_level,
+            "time_orientation": self.time_orientation,
+            "user_context": self.user_context or {}
+        }
+
 class AuthUser(Document):
     username = StringField(required=True, unique=True)
     email = StringField(required=True, unique=True)
@@ -36,6 +58,7 @@ class AuthUser(Document):
     online = BooleanField(default=False)
     can_view_friend_notes = BooleanField(default=True)
     share_notes_with_friends = BooleanField(default=True)
+    ai_preferences = EmbeddedDocumentField(AIPreferences, default=AIPreferences)
     
     meta = {
         'collection': 'users'
@@ -76,7 +99,8 @@ class AuthUser(Document):
             "is_premium": self.is_premium,
             "online": self.online,
             "can_view_friend_notes": self.can_view_friend_notes,
-            "share_notes_with_friends": self.share_notes_with_friends
+            "share_notes_with_friends": self.share_notes_with_friends,
+            "ai_preferences": self.ai_preferences.to_json() if self.ai_preferences else None
         }
 
     def add_friend_request(self, from_user):
