@@ -16,6 +16,7 @@ from mongoengine import connect
 import certifi
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
+import gc
 
 # Configure logging to output to stdout
 logging.basicConfig(
@@ -121,6 +122,27 @@ def after_request(response):
     # Log request duration
     duration = time.time() - g.start_time
     logger.info(f"Request to {request.path} took {duration:.2f} seconds")
+    
+    # Clean up memory after each request
+    try:
+        # Import here to avoid circular imports
+        from utils.rag import clear_model_cache
+        
+        # Clean any ML models loaded by the RAG module
+        clear_model_cache()
+        
+        # Force Python garbage collection
+        gc.collect()
+        
+        # Clean torch cache if available
+        import torch
+        if hasattr(torch, 'cuda') and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        logger.info("Memory cleanup completed successfully")
+    except Exception as e:
+        logger.warning(f"Memory cleanup failed: {str(e)}")
+    
     return response
 
 @app.route('/test', methods=['GET'])

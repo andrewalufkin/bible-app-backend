@@ -8,18 +8,47 @@ import random
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from typing import List, Dict, Any, Optional
+import gc
 
 # Load environment variables
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
+# Global model reference - will be lazily loaded
+_model = None
+
 # Load the sentence transformer model (this will be cached after first load)
 def get_embedding_model():
+    global _model
+    if _model is not None:
+        return _model
+    
     try:
-        return SentenceTransformer('all-MiniLM-L6-v2')
+        # Use a smaller model that requires less memory
+        _model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Force model to CPU to reduce GPU memory usage
+        _model = _model.to("cpu")
+        
+        # Clear any cached tensors
+        torch.cuda.empty_cache()
+        
+        return _model
     except Exception as e:
         print(f"Error loading embedding model: {e}")
         return None
+
+def clear_model_cache():
+    """Clear the model from memory when not in use"""
+    global _model
+    if _model is not None:
+        del _model
+        _model = None
+        # Force garbage collection
+        gc.collect()
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 def call_anthropic_api(messages, max_tokens=1024, temperature=0.7, max_retries=3):
     """Call the Anthropic Claude API with retry mechanism for overloaded errors"""
@@ -108,16 +137,36 @@ def call_anthropic_api(messages, max_tokens=1024, temperature=0.7, max_retries=3
 
 def get_embeddings(texts: List[str]) -> Optional[List[np.ndarray]]:
     """Generate embeddings for a list of texts"""
-    model = get_embedding_model()
-    if not model:
-        return None
-    
     try:
-        with torch.no_grad():
-            embeddings = model.encode(texts, convert_to_numpy=True)
+        # Get model (lazy loading)
+        model = get_embedding_model()
+        if not model:
+            return None
+        
+        # Process in smaller batches to reduce memory usage
+        batch_size = 8
+        embeddings = []
+        
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i+batch_size]
+            with torch.no_grad():
+                batch_embeddings = model.encode(batch_texts, convert_to_numpy=True)
+            
+            if isinstance(batch_embeddings, np.ndarray) and len(batch_embeddings.shape) == 2:
+                # If it returned a 2D array with multiple embeddings
+                embeddings.extend([emb for emb in batch_embeddings])
+            else:
+                # If it returned a single embedding
+                embeddings.append(batch_embeddings)
+        
+        # Clear cached tensors after processing
+        torch.cuda.empty_cache()
+        
         return embeddings
     except Exception as e:
         print(f"Error generating embeddings: {e}")
+        # Always clear memory on error
+        clear_model_cache()
         return None
 
 def calculate_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:

@@ -3,7 +3,7 @@ from models.note import Note, NoteType, ChapterNote, Insight
 from routes.auth import token_required
 from mongoengine.errors import NotUniqueError, ValidationError
 from models.auth import AuthUser
-from utils.rag import generate_verse_insights
+from utils.rag import generate_verse_insights, clear_model_cache
 from datetime import datetime
 import json
 
@@ -411,6 +411,9 @@ def generate_insights(current_user):
             chapter_note=chapter_note,
             ai_preferences=ai_preferences
         )
+        
+        # Clean up model memory after generating insights
+        clear_model_cache()
         
         # Check if there was an error in generating insights
         if 'error' in insights:
