@@ -34,13 +34,10 @@ app = Flask(__name__)
 # Use ProxyFix to handle proxy headers properly (important for Railway)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# Increase limits to avoid any truncation issues
+# Scale down JSON settings to optimize memory usage
 app.json.sort_keys = False  # Preserve order of keys in JSON responses
-app.json.compact = False    # Ensure proper formatting
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request/response size
-app.config['JSON_MAX_CONTENT_LENGTH'] = None  # No limit on JSON size
-app.config['MAX_COOKIE_SIZE'] = 16384  # Set a large cookie size
-app.config['APPLICATION_ROOT'] = '/'  # Set application root
+app.json.compact = True     # Use compact JSON to reduce memory usage 
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max request/response size (reduced from 100MB)
 app.config['CORS_HEADERS'] = 'Content-Type'  # Add CORS headers configuration
 app.config['CORS_SUPPORTS_CREDENTIALS'] = True  # Enable credentials support
 app.config['CORS_EXPOSE_HEADERS'] = ['Content-Type', 'Authorization']  # Expose headers
@@ -71,16 +68,16 @@ RETRY_DELAY = 5  # seconds
 for attempt in range(MAX_RETRIES):
     try:
         logger.info(f"Database connection attempt {attempt + 1}/{MAX_RETRIES}")
-        # Connect using MongoEngine with optimized settings for Railway
+        # Connect using MongoEngine with optimized settings for Railway with reduced memory usage
         connect(
             host=mongodb_uri,
             tlsCAFile=certifi.where(),
             alias='default',  # This sets up the default connection
-            serverSelectionTimeoutMS=25000,  # 25 seconds timeout for server selection (increased)
-            connectTimeoutMS=45000,  # 45 seconds timeout for initial connection (increased)
-            socketTimeoutMS=90000,  # 90 seconds timeout for socket operations (increased)
-            maxPoolSize=10,  # Limit connection pool size
-            minPoolSize=1,  # Keep at least one connection alive
+            serverSelectionTimeoutMS=25000,  # 25 seconds timeout for server selection
+            connectTimeoutMS=45000,  # 45 seconds timeout for initial connection
+            socketTimeoutMS=90000,  # 90 seconds timeout for socket operations
+            maxPoolSize=2,   # Reduced from 10 to minimize memory usage
+            minPoolSize=1,   # Keep at least one connection alive
             waitQueueTimeoutMS=30000,  # Wait queue timeout
             retryWrites=True,  # Retry write operations
             heartbeatFrequencyMS=15000  # More frequent heartbeats to keep connection alive

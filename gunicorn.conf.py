@@ -13,11 +13,9 @@ loglevel = 'info'
 port = os.getenv('PORT', '8080')
 bind = f"0.0.0.0:{port}"
 
-# Determine appropriate worker count based on CPU cores
-# For Railway, we want to be conservative with resources
-cores = multiprocessing.cpu_count()
-workers = min(cores * 2 + 1, 6)  # Use standard formula but cap at 6 workers
-threads = 4  # Use threading for I/O bound applications
+# Reduce workers and threads to minimize memory usage
+workers = 1  # Use a single worker to minimize memory usage
+threads = 2  # Reduce threads to minimize memory usage
 
 # Log configuration on startup
 def on_starting(server):
@@ -31,7 +29,7 @@ def on_starting(server):
 timeout = 180  # 3 minutes timeout for slow operations
 keepalive = 120  # Keep connections alive for 2 minutes
 worker_class = "sync"  # Use sync workers for Flask
-worker_connections = 1000  # Maximum number of connections each worker can handle
+worker_connections = 100  # Reduced from 1000 to save memory
 
 # Process naming
 proc_name = "bible_app"
