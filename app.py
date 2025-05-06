@@ -5,15 +5,13 @@ from routes.bible import bible_bp
 from routes.auth import auth_bp
 from routes.friends import friends_bp
 from routes.notes import notes_bp
-from database import init_db
-from models.bible import BibleVerse
+from routes.highlight import highlight_bp
+from database import get_supabase, get_db
 from dotenv import load_dotenv
 import os
 import logging
 import time
 import sys
-from mongoengine import connect
-import certifi
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 import gc
@@ -49,7 +47,7 @@ CORS(app, resources={
         "origins": "*",
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Type"],
+        "expose_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
     }
 })
@@ -57,48 +55,21 @@ CORS(app, resources={
 # Ensure URLs with or without trailing slashes are handled the same way
 app.url_map.strict_slashes = False
 
-# Initialize MongoDB connection with MongoEngine
-mongodb_uri = os.getenv('MONGODB_URI')
-if not mongodb_uri:
-    raise ValueError("MONGODB_URI not found in environment variables")
-
-# Try to connect to the database with retries
-MAX_RETRIES = 5  # Increased from 3
-RETRY_DELAY = 5  # seconds
-
-for attempt in range(MAX_RETRIES):
-    try:
-        logger.info(f"Database connection attempt {attempt + 1}/{MAX_RETRIES}")
-        # Connect using MongoEngine with optimized settings for Railway with reduced memory usage
-        connect(
-            host=mongodb_uri,
-            tlsCAFile=certifi.where(),
-            alias='default',  # This sets up the default connection
-            serverSelectionTimeoutMS=25000,  # 25 seconds timeout for server selection
-            connectTimeoutMS=45000,  # 45 seconds timeout for initial connection
-            socketTimeoutMS=90000,  # 90 seconds timeout for socket operations
-            maxPoolSize=2,   # Reduced from 10 to minimize memory usage
-            minPoolSize=1,   # Keep at least one connection alive
-            waitQueueTimeoutMS=30000,  # Wait queue timeout
-            retryWrites=True,  # Retry write operations
-            heartbeatFrequencyMS=15000  # More frequent heartbeats to keep connection alive
-        )
-        logger.info("Successfully connected to MongoDB Atlas")
-        break
-    except Exception as e:
-        logger.error(f"Error during database connection: {str(e)}")
-        if attempt < MAX_RETRIES - 1:
-            logger.info(f"Retrying in {RETRY_DELAY} seconds...")
-            time.sleep(RETRY_DELAY)
-        else:
-            logger.error("Max retries reached. Starting app without database connection.")
-            raise
+# Initialize Supabase connection
+try:
+    logger.info("Initializing Supabase connection...")
+    supabase = get_supabase()
+    logger.info("Successfully connected to Supabase")
+except Exception as e:
+    logger.error(f"Error connecting to Supabase: {str(e)}")
+    raise
 
 # Register blueprints
 app.register_blueprint(bible_bp, url_prefix='/api/bible')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(friends_bp, url_prefix='/api/friends')
 app.register_blueprint(notes_bp, url_prefix='/api/notes')
+app.register_blueprint(highlight_bp)
 
 # Request timeout middleware
 def timeout_handler(seconds):
@@ -151,13 +122,16 @@ def test():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint that also verifies MongoDB connection"""
+    """Health check endpoint that also verifies Supabase connection"""
     try:
-        # Check if MongoDB is connected
-        db_status = BibleVerse.objects().limit(1).count() >= 0
+        # Check if Supabase is connected by making a simple query
+        with get_db() as client:
+            response = client.table('bible_verses').select('id').limit(1).execute()
+            db_status = len(response.data) >= 0
+            
         return jsonify({
             'status': 'healthy',
-            'mongodb': 'connected' if db_status else 'error',
+            'supabase': 'connected' if db_status else 'error',
             'timestamp': time.time()
         })
     except Exception as e:

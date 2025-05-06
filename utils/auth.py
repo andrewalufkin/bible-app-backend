@@ -5,6 +5,9 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import request, jsonify
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key')  # In production, use a proper secret key
 JWT_EXPIRATION_HOURS = 24
@@ -34,26 +37,38 @@ def token_required(f):
     """Decorator to protect routes with JWT"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        logger.info(f"token_required decorator executing for: {request.path}")
         token = None
+        auth_header = request.headers.get('Authorization')
         
-        # Try to get token from headers
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
+        if auth_header:
+            logger.info(f"Authorization header found: {auth_header[:15]}...")
             try:
                 token = auth_header.split(" ")[1]
+                logger.info(f"Token extracted: {token[:10]}...")
             except IndexError:
+                logger.warning("Invalid token format in Authorization header.")
                 return jsonify({'error': 'Invalid token format'}), 401
+        else:
+            logger.warning("Authorization header missing.")
 
         if not token:
+            logger.warning("Token is missing or could not be extracted.")
             return jsonify({'error': 'Token is required'}), 401
 
         try:
             data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
             current_user_id = data['user_id']
+            logger.info(f"Token successfully decoded for user_id: {current_user_id}")
         except jwt.ExpiredSignatureError:
+            logger.warning("Token has expired.")
             return jsonify({'error': 'Token has expired'}), 401
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"Invalid token: {e}")
             return jsonify({'error': 'Invalid token'}), 401
+        except Exception as e:
+             logger.error(f"An unexpected error occurred during token decoding: {e}")
+             return jsonify({'error': 'Token processing error'}), 500
 
         return f(current_user_id, *args, **kwargs)
 

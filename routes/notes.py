@@ -1,464 +1,427 @@
-from flask import Blueprint, jsonify, request
-from models.note import Note, NoteType, ChapterNote, Insight
-from routes.auth import token_required
-from mongoengine.errors import NotUniqueError, ValidationError
-from models.auth import AuthUser
-from utils.rag import generate_verse_insights, clear_model_cache
+from flask import Blueprint, request, jsonify
 from datetime import datetime
-import json
+from utils.auth import token_required
+from database import get_db
+import logging
+from functools import wraps
 
 notes_bp = Blueprint('notes', __name__)
+logger = logging.getLogger(__name__)
 
-@notes_bp.route('/verse/<book>/<chapter>/<verse>', methods=['GET'])
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            if auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
+
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+
+        try:
+            with get_db() as client:
+                # Verify the JWT token with Supabase
+                user_response = client.auth.get_user(token)
+                if not user_response:
+                    return jsonify({'message': 'Invalid token!'}), 401
+                
+                # Extract user ID from the response
+                user_id = user_response.user.id
+                return f(user_id, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Token validation error: {str(e)}")
+            return jsonify({'message': 'Invalid token!'}), 401
+
+    return decorated
+
+@notes_bp.route('/notes', methods=['GET'])
 @token_required
-def get_verse_notes(current_user, book, chapter, verse):
-    """Get all notes (both study and quick) for a specific verse"""
+def get_notes(current_user):
     try:
-        # Get the user's own notes
-        own_notes = Note.objects(
-            user=current_user.id,
-            book=book,
-            chapter=chapter,
-            verse=verse
-        )
-
-        # Get notes from friends only if the user has permission to view them
-        friend_notes = []
-        if current_user.can_view_friend_notes:
-            # Get friends who share their notes
-            sharing_friends = AuthUser.objects(
-                id__in=[friend.id for friend in current_user.friends],
-                share_notes_with_friends=True
-            )
+        with get_db() as client:
+            response = client.table('notes').select('*').eq('user_id', current_user).order('created_at', desc=True).execute()
+            notes = response.data
             
-            friend_notes = Note.objects(
-                user__in=[f.id for f in sharing_friends],
-                book=book,
-                chapter=chapter,
-                verse=verse,
-                note_type='study'  # Only get study notes from friends
-            )
-
-        # Convert notes to JSON and include user information
-        response_notes = []
+        return jsonify([{
+            'id': note['id'],
+            'user_id': note['user_id'],
+            'verse_id': note['verse_id'],
+            'content': note['content'],
+            'created_at': note['created_at'],
+            'updated_at': note['updated_at']
+        } for note in notes])
         
-        # Add own notes
-        for note in own_notes:
-            note_json = note.to_json()
-            note_json['user'] = {
-                'id': str(current_user.id),
-                'username': current_user.username,
-                'is_self': True
-            }
-            response_notes.append(note_json)
-        
-        # Add friend notes
-        for note in friend_notes:
-            note_json = note.to_json()
-            friend = AuthUser.objects(id=note.user.id).first()
-            if friend:  # Make sure friend still exists
-                note_json['user'] = {
-                    'id': str(friend.id),
-                    'username': friend.username,
-                    'is_self': False
-                }
-                response_notes.append(note_json)
-
-        return jsonify(response_notes)
     except Exception as e:
-        print(f"Error fetching notes: {str(e)}")
-        return jsonify({"message": "Failed to fetch notes"}), 500
+        logger.error(f"Error fetching notes: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@notes_bp.route('/study', methods=['POST'])
+@notes_bp.route('/notes', methods=['POST'])
 @token_required
-def create_or_update_study_note(current_user):
-    """Create or update a study note for a verse"""
+def create_note(current_user):
     try:
         data = request.get_json()
-        
-        # Validate required fields
-        required_fields = ['book', 'chapter', 'verse', 'content']
-        if not all(field in data for field in required_fields):
-            return jsonify({"message": "Missing required fields"}), 400
+        verse_id = data.get('verse_id')
+        content = data.get('content')
 
-        # If content is empty or just whitespace, delete the note if it exists
-        if not data['content'].strip():
-            existing_note = Note.objects(
-                user=current_user.id,
-                book=data['book'],
-                chapter=data['chapter'],
-                verse=data['verse'],
-                note_type=NoteType.STUDY
-            ).first()
+        if not all([verse_id, content]):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        # Verify verse exists
+        with get_db() as client:
+            verse_response = client.table('bible_verses').select('id').eq('id', verse_id).execute()
+            if not verse_response.data:
+                return jsonify({'error': 'Verse not found'}), 404
+
+            # Create note
+            current_time = datetime.utcnow().isoformat()
+            note_data = {
+                'user_id': current_user,
+                'verse_id': verse_id,
+                'content': content,
+                'created_at': current_time,
+                'updated_at': current_time
+            }
+
+            response = client.table('notes').insert(note_data).execute()
             
-            if existing_note:
-                existing_note.delete()
-            
-            return jsonify({"message": "Note deleted"}), 200
+            if not response.data:
+                return jsonify({'error': 'Failed to create note'}), 500
 
-        # Try to find existing note
-        existing_note = Note.objects(
-            user=current_user.id,
-            book=data['book'],
-            chapter=data['chapter'],
-            verse=data['verse'],
-            note_type=NoteType.STUDY
-        ).first()
+            return jsonify({
+                'message': 'Note created successfully',
+                'note': response.data[0]
+            }), 201
 
-        if existing_note:
-            # Update existing note
-            existing_note.content = data['content']
-            existing_note.save()
-            return jsonify(existing_note.to_json())
-        else:
-            # Create new note
-            new_note = Note(
-                user=current_user.id,
-                book=data['book'],
-                chapter=data['chapter'],
-                verse=data['verse'],
-                content=data['content'],
-                note_type=NoteType.STUDY
-            )
-            new_note.save()
-            return jsonify(new_note.to_json()), 201
-
-    except NotUniqueError:
-        return jsonify({"message": "Note already exists"}), 409
-    except ValidationError as e:
-        return jsonify({"message": str(e)}), 400
     except Exception as e:
-        print(f"Error saving note: {str(e)}")
-        return jsonify({"message": "Failed to save note"}), 500
+        logger.error(f"Error creating note: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@notes_bp.route('/quick', methods=['POST'])
+@notes_bp.route('/notes/<note_id>', methods=['PUT'])
 @token_required
-def create_or_update_quick_note(current_user):
-    """Create or update a quick note for a verse"""
+def update_note(current_user, note_id):
     try:
         data = request.get_json()
-        
-        # Validate required fields
-        required_fields = ['book', 'chapter', 'verse', 'content']
-        if not all(field in data for field in required_fields):
-            return jsonify({"message": "Missing required fields"}), 400
+        content = data.get('content')
 
-        # Try to find existing note
-        existing_note = Note.objects(
-            user=current_user.id,
-            book=data['book'],
-            chapter=data['chapter'],
-            verse=data['verse'],
-            note_type=NoteType.QUICK
-        ).first()
+        if not content:
+            return jsonify({'error': 'Content is required'}), 400
 
-        if existing_note:
-            # Update existing note
-            existing_note.content = data['content']
-            existing_note.save()
-            return jsonify(existing_note.to_json())
-        else:
-            # Create new note
-            new_note = Note(
-                user=current_user.id,
-                book=data['book'],
-                chapter=data['chapter'],
-                verse=data['verse'],
-                content=data['content'],
-                note_type=NoteType.QUICK
-            )
-            new_note.save()
-            return jsonify(new_note.to_json()), 201
+        with get_db() as client:
+            # Verify note exists and belongs to user
+            response = client.table('notes').select('*').eq('id', note_id).eq('user_id', current_user).execute()
+            if not response.data:
+                return jsonify({'error': 'Note not found'}), 404
 
-    except NotUniqueError:
-        return jsonify({"message": "Note already exists"}), 409
-    except ValidationError as e:
-        return jsonify({"message": str(e)}), 400
+            # Update note
+            update_response = client.table('notes').update({
+                'content': content,
+                'updated_at': datetime.utcnow().isoformat()
+            }).eq('id', note_id).execute()
+
+            if not update_response.data:
+                return jsonify({'error': 'Failed to update note'}), 500
+
+            return jsonify({
+                'message': 'Note updated successfully',
+                'note': update_response.data[0]
+            })
+
     except Exception as e:
-        print(f"Error saving note: {str(e)}")
-        return jsonify({"message": "Failed to save note"}), 500
+        logger.error(f"Error updating note: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@notes_bp.route('/all', methods=['GET'])
+@notes_bp.route('/notes/<note_id>', methods=['DELETE'])
 @token_required
-def get_all_notes(current_user):
-    """Get all notes for the current user with pagination"""
+def delete_note(current_user, note_id):
     try:
-        page = request.args.get('page', default=1, type=int)
-        limit = request.args.get('limit', default=10, type=int)
-        
-        # Cap limit to reasonable values
-        if limit > 50:
-            limit = 50
+        with get_db() as client:
+            # Verify note exists and belongs to user
+            response = client.table('notes').select('*').eq('id', note_id).eq('user_id', current_user).execute()
+            if not response.data:
+                return jsonify({'error': 'Note not found'}), 404
+
+            # Delete note
+            delete_response = client.table('notes').delete().eq('id', note_id).execute()
             
-        # Calculate skip for pagination
-        skip = (page - 1) * limit
-        
-        # Get total count of notes
-        total_count = Note.objects(user=current_user.id).count()
-        
-        # Get the user's notes ordered by updated_at in descending order
-        notes = Note.objects(user=current_user.id).order_by('-updated_at').skip(skip).limit(limit)
-        
-        # Convert notes to JSON with reference data
-        response_notes = []
-        for note in notes:
-            note_json = note.to_json()
-            note_json['user'] = {
-                'id': str(current_user.id),
-                'username': current_user.username
-            }
-            response_notes.append(note_json)
-        
-        # Create response with pagination metadata
-        response = {
-            'notes': response_notes,
-            'pagination': {
-                'total': total_count,
-                'page': page,
-                'limit': limit,
-                'pages': (total_count + limit - 1) // limit  # Ceiling division
-            }
-        }
-        
-        return jsonify(response)
-    except Exception as e:
-        print(f"Error fetching all notes: {str(e)}")
-        return jsonify({"message": "Failed to fetch notes"}), 500
+            if not delete_response.data:
+                return jsonify({'error': 'Failed to delete note'}), 500
 
-@notes_bp.route('/chapter', methods=['POST'])
+            return jsonify({
+                'message': 'Note deleted successfully'
+            })
+
+    except Exception as e:
+        logger.error(f"Error deleting note: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@notes_bp.route('/notes/verse/<verse_id>', methods=['GET'])
 @token_required
-def create_or_update_chapter_note(current_user):
-    """Create or update a chapter note"""
+def get_notes_for_verse(current_user, verse_id):
     try:
-        data = request.get_json()
+        with get_db() as client:
+            response = client.table('notes').select('*').eq('user_id', current_user).eq('verse_id', verse_id).order('created_at', desc=True).execute()
+            notes = response.data
+            
+        return jsonify([{
+            'id': note['id'],
+            'user_id': note['user_id'],
+            'verse_id': note['verse_id'],
+            'content': note['content'],
+            'created_at': note['created_at'],
+            'updated_at': note['updated_at']
+        } for note in notes])
         
-        # Validate required fields
-        required_fields = ['book', 'chapter', 'content']
-        if not all(field in data for field in required_fields):
-            return jsonify({"message": "Missing required fields"}), 400
-
-        # Try to find existing note
-        existing_note = ChapterNote.objects(
-            user=current_user.id,
-            book=data['book'],
-            chapter=data['chapter']
-        ).first()
-
-        if existing_note:
-            # Update existing note
-            existing_note.content = data['content']
-            existing_note.save()
-            return jsonify(existing_note.to_json())
-        else:
-            # Create new note
-            new_note = ChapterNote(
-                user=current_user.id,
-                book=data['book'],
-                chapter=data['chapter'],
-                content=data['content']
-            )
-            new_note.save()
-            return jsonify(new_note.to_json()), 201
-
     except Exception as e:
-        print(f"Error saving chapter note: {str(e)}")
-        return jsonify({"message": f"Failed to save chapter note: {str(e)}"}), 500
-
-@notes_bp.route('/chapter/<book>/<chapter>', methods=['GET'])
-@token_required
-def get_chapter_note(current_user, book, chapter):
-    """Get chapter note for a specific chapter"""
-    try:
-        # Get the user's own chapter note
-        note = ChapterNote.objects(
-            user=current_user.id,
-            book=book,
-            chapter=chapter
-        ).first()
-        
-        if note:
-            note_json = note.to_json()
-            note_json['user'] = {
-                'id': str(current_user.id),
-                'username': current_user.username,
-                'is_self': True
-            }
-            return jsonify(note_json)
-        else:
-            return jsonify({"message": "No chapter note found"}), 404
-    except Exception as e:
-        print(f"Error fetching chapter note: {str(e)}")
-        return jsonify({"message": "Failed to fetch chapter note"}), 500
+        logger.error(f"Error fetching notes for verse: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @notes_bp.route('/chapter/<book>/<chapter>/notes', methods=['GET'])
 @token_required
-def get_all_chapter_notes(current_user, book, chapter):
-    """Get all notes for all verses in a specific chapter in a single request"""
+def get_chapter_notes(current_user, book, chapter):
     try:
-        # Get the user's own notes for all verses in this chapter
-        own_notes = Note.objects(
-            user=current_user.id,
-            book=book,
-            chapter=chapter
-        )
-
-        # Get notes from friends only if the user has permission to view them
-        friend_notes = []
-        if current_user.can_view_friend_notes:
-            # Get friends who share their notes
-            sharing_friends = AuthUser.objects(
-                id__in=[friend.id for friend in current_user.friends],
-                share_notes_with_friends=True
-            )
+        with get_db() as client:
+            response = client.table('notes').select('*').eq('user_id', current_user).eq('book', book).eq('chapter', chapter).order('created_at', desc=True).execute()
+            notes = response.data
             
-            friend_notes = Note.objects(
-                user__in=[f.id for f in sharing_friends],
-                book=book,
-                chapter=chapter,
-                note_type='study'  # Only get study notes from friends
-            )
-
-        # Convert notes to JSON and include user information
-        response_notes = []
+        # Format the notes to include the nested user object expected by the frontend
+        formatted_notes = []
+        for note in notes:
+            formatted_notes.append({
+                'id': note['id'],
+                # Add the nested user object
+                'user': {
+                    'id': note['user_id'],
+                    'is_self': True # Since we query by current_user, these are always self
+                },
+                'book': note['book'],
+                'chapter': note['chapter'],
+                'verse': note['verse'],
+                'content': note['content'],
+                'note_type': note['note_type'],
+                'created_at': note['created_at'],
+                'updated_at': note['updated_at']
+            })
+            
+        return jsonify(formatted_notes)
         
-        # Add own notes
-        for note in own_notes:
-            note_json = note.to_json()
-            note_json['user'] = {
-                'id': str(current_user.id),
-                'username': current_user.username,
-                'is_self': True
-            }
-            response_notes.append(note_json)
-        
-        # Add friend notes
-        for note in friend_notes:
-            note_json = note.to_json()
-            friend = AuthUser.objects(id=note.user.id).first()
-            if friend:  # Make sure friend still exists
-                note_json['user'] = {
-                    'id': str(friend.id),
-                    'username': friend.username,
-                    'is_self': False
-                }
-                response_notes.append(note_json)
-
-        return jsonify(response_notes)
     except Exception as e:
-        print(f"Error fetching chapter notes: {str(e)}")
-        return jsonify({"message": "Failed to fetch chapter notes"}), 500
+        logger.error(f"Error fetching chapter notes: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@notes_bp.route('/insights', methods=['GET', 'POST'])
+@notes_bp.route('/chapter/<book>/<chapter>', methods=['GET'])
 @token_required
-def generate_insights(current_user):
-    """Generate insights based on Bible verses and user notes using RAG or retrieve existing insights"""
+def get_single_chapter_note(current_user, book, chapter):
+    """
+    Fetches the single chapter-level note for a given user, book, and chapter.
+    """
     try:
-        if request.method == 'GET':
-            # Get book and chapter from query parameters
-            book = request.args.get('book')
-            chapter = request.args.get('chapter')
-            
-            if not book or not chapter:
-                return jsonify({"message": "Missing 'book' or 'chapter' parameters"}), 400
-                
-            # Check if insights already exist
-            existing_insight = Insight.objects(
-                user=current_user.id,
-                book=book,
-                chapter=chapter
-            ).first()
-            
-            if existing_insight:
-                # Convert to JSON and return
-                insight_json = existing_insight.to_json()
-                return jsonify(insight_json)
+        with get_db() as client:
+            response = client.table('notes').select('id, content, created_at, updated_at') \
+                .eq('user_id', current_user) \
+                .eq('book', book) \
+                .eq('chapter', chapter) \
+                .eq('note_type', 'chapter') \
+                .limit(1) \
+                .execute()
+
+            # Check if data exists and is not empty
+            if response.data:
+                note = response.data[0] # Get the first (and only) note
+                return jsonify(note)
             else:
-                return jsonify({"message": "No insights found for this chapter"}), 404
-        
-        # Handle POST request
-        data = request.get_json()
-        
-        # Validate required fields
-        if 'verses' not in data or not isinstance(data['verses'], list):
-            return jsonify({"message": "Missing or invalid 'verses' array"}), 400
-            
-        if not data['verses']:
-            return jsonify({"message": "Verses array cannot be empty"}), 400
-            
-        # Get optional fields with defaults
-        verse_notes = data.get('verse_notes', [])
-        chapter_note = data.get('chapter_note', {})
-        
-        # If user has custom AI preferences, use those; otherwise use defaults
-        if hasattr(current_user, 'ai_preferences') and current_user.ai_preferences:
-            ai_preferences = current_user.ai_preferences.to_json()
-        else:
-            ai_preferences = {
-                "model_temperature": 0.7,
-                "response_length": 200,
-                "writing_style": "devotional",
-                "preferred_topics": []
-            }
-            
-        # Override with any preferences passed in the request
-        if 'ai_preferences' in data and isinstance(data['ai_preferences'], dict):
-            ai_preferences.update(data['ai_preferences'])
-        
-        # Generate insights
-        insights = generate_verse_insights(
-            verses=data['verses'],
-            verse_notes=verse_notes,
-            chapter_note=chapter_note,
-            ai_preferences=ai_preferences
-        )
-        
-        # Clean up model memory after generating insights
-        clear_model_cache()
-        
-        # Check if there was an error in generating insights
-        if 'error' in insights:
-            # Return the error but with a 200 status so the frontend can access the error message
-            return jsonify(insights), 200
-        
-        # Save insights to database
-        # Extract book and chapter from the first verse
-        book = data['verses'][0]['book']
-        chapter = data['verses'][0]['chapter']
-        
-        # Check if insights already exist for this book and chapter
-        existing_insight = Insight.objects(
-            user=current_user.id,
-            book=book,
-            chapter=chapter
-        ).first()
-        
-        if existing_insight:
-            # Update existing insight
-            existing_insight.content = insights['insights']
-            existing_insight.preferences_used = insights['preferences_used']
-            existing_insight.created_at = datetime.utcnow()
-            existing_insight.save()
-        else:
-            # Create new insight
-            new_insight = Insight(
-                user=current_user.id,
-                book=book,
-                chapter=chapter,
-                content=insights['insights'],
-                preferences_used=insights['preferences_used']
-            )
-            new_insight.save()
-        
-        # Convert to consistent structure with the GET endpoint
-        response_data = {
-            "chapter_reference": f"{book} {chapter}",
-            "content": insights['insights'],
-            "preferences_used": insights['preferences_used'],
-            "created_at": datetime.utcnow().isoformat()
-        }
-        
-        return jsonify(response_data)
-        
+                # Return an empty object with null/default values if no note exists,
+                # consistent with how fetchSingleChapterNote handles 404 in the frontend.
+                return jsonify({
+                    'id': None,
+                    'content': '',
+                    'created_at': None,
+                    'updated_at': None
+                }), 200 # Return 200 OK even if note doesn't exist yet
+
     except Exception as e:
-        print(f"Error generating insights: {str(e)}")
-        return jsonify({"message": f"Failed to generate insights: {str(e)}"}), 500 
+        logger.exception(f"Error fetching single chapter note for user {current_user}, book {book}, chapter {chapter}: {str(e)}")
+        return jsonify({'error': 'An internal server error occurred while fetching the chapter note.'}), 500
+
+@notes_bp.route('/study', methods=['POST'])
+@token_required
+def create_study_note(current_user):
+    try:
+        data = request.get_json()
+        book = data.get('book')
+        chapter = data.get('chapter')
+        verse = data.get('verse')
+        content = data.get('content')
+
+        if not all([book, chapter, verse, content]):
+            return jsonify({'error': 'Missing required fields (book, chapter, verse, content)'}), 400
+
+        with get_db() as client:
+            current_time = datetime.utcnow().isoformat()
+            note_type = 'study'
+
+            # 1. Check if a study note already exists for this verse
+            existing_note_response = client.table('notes') \
+                .select('id') \
+                .eq('user_id', current_user) \
+                .eq('book', book) \
+                .eq('chapter', chapter) \
+                .eq('verse', verse) \
+                .eq('note_type', note_type) \
+                .limit(1) \
+                .execute()
+
+            if existing_note_response.data:
+                # 2a. Update existing note
+                existing_note_id = existing_note_response.data[0]['id']
+                update_data = {
+                    'content': content,
+                    'updated_at': current_time
+                }
+                response = client.table('notes') \
+                    .update(update_data) \
+                    .eq('id', existing_note_id) \
+                    .execute()
+                operation = 'updated'
+            else:
+                # 2b. Insert new note
+                insert_data = {
+                    'user_id': current_user,
+                    'book': book,
+                    'chapter': chapter,
+                    'verse': verse,
+                    'content': content,
+                    'note_type': note_type,
+                    'created_at': current_time, # Set created_at on initial insert
+                    'updated_at': current_time
+                }
+                response = client.table('notes') \
+                    .insert(insert_data) \
+                    .execute()
+                operation = 'created'
+
+            # Check for success
+            if not response.data:
+                logger.error(f"Failed to {operation} study note. User: {current_user}, Ref: {book} {chapter}:{verse}. Response: {response}")
+                return jsonify({'error': f'Failed to save study note ({operation} operation)'}), 500
+
+            # Return the created/updated note data
+            return jsonify({
+                'message': f'Study note {operation} successfully',
+                'note': response.data[0]
+            }), 200 if operation == 'updated' else 201 # 200 for update, 201 for create
+
+    except Exception as e:
+        logger.exception(f"Error saving study note for user {current_user}, ref {book} {chapter}:{verse}: {str(e)}")
+        return jsonify({'error': 'An internal server error occurred while saving the note.'}), 500
+
+@notes_bp.route('/quick', methods=['POST'])
+@token_required
+def create_quick_note(current_user):
+    try:
+        data = request.get_json()
+        book = data.get('book')
+        chapter = data.get('chapter')
+        verse = data.get('verse')
+        content = data.get('content')
+
+        if not all([book, chapter, verse, content]):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        with get_db() as client:
+            # Create quick note
+            current_time = datetime.utcnow().isoformat()
+            note_data = {
+                'user_id': current_user,
+                'book': book,
+                'chapter': chapter,
+                'verse': verse,
+                'content': content,
+                'note_type': 'quick',
+                'created_at': current_time,
+                'updated_at': current_time
+            }
+
+            response = client.table('notes').insert(note_data).execute()
+            
+            if not response.data:
+                return jsonify({'error': 'Failed to create quick note'}), 500
+
+            return jsonify({
+                'message': 'Quick note created successfully',
+                'note': response.data[0]
+            }), 201
+
+    except Exception as e:
+        logger.error(f"Error creating quick note: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@notes_bp.route('/chapter', methods=['POST'])
+@token_required
+def create_chapter_note(current_user):
+    try:
+        data = request.get_json()
+        book = data.get('book')
+        chapter = data.get('chapter')
+        content = data.get('content')
+
+        if not all([book, chapter, content]):
+            return jsonify({'error': 'Missing required fields (book, chapter, content)'}), 400
+
+        with get_db() as client:
+            current_time = datetime.utcnow().isoformat()
+            note_type = 'chapter'
+
+            # 1. Check if a chapter note already exists
+            existing_note_response = client.table('notes') \
+                .select('id') \
+                .eq('user_id', current_user) \
+                .eq('book', book) \
+                .eq('chapter', chapter) \
+                .eq('note_type', note_type) \
+                .limit(1) \
+                .execute()
+
+            if existing_note_response.data:
+                # 2a. Update existing note
+                existing_note_id = existing_note_response.data[0]['id']
+                update_data = {
+                    'content': content,
+                    'updated_at': current_time
+                }
+                response = client.table('notes') \
+                    .update(update_data) \
+                    .eq('id', existing_note_id) \
+                    .execute()
+                operation = 'updated'
+            else:
+                # 2b. Insert new note
+                insert_data = {
+                    'user_id': current_user,
+                    'book': book,
+                    'chapter': chapter,
+                    'content': content,
+                    'note_type': note_type, 
+                    'created_at': current_time,
+                    'updated_at': current_time
+                }
+                response = client.table('notes') \
+                    .insert(insert_data) \
+                    .execute()
+                operation = 'created'
+            
+            # Check for success
+            if not response.data:
+                logger.error(f"Failed to {operation} chapter note. User: {current_user}, Book: {book}, Chapter: {chapter}. Response: {response}")
+                return jsonify({'error': f'Failed to save chapter note ({operation} operation)'}), 500
+
+            # Return the created/updated note data
+            return jsonify({
+                'message': f'Chapter note {operation} successfully',
+                'note': response.data[0]
+            }), 200 if operation == 'updated' else 201 # 200 for update, 201 for create
+
+    except Exception as e:
+        logger.exception(f"Error saving chapter note for user {current_user}, book {book}, chapter {chapter}: {str(e)}")
+        return jsonify({'error': 'An internal server error occurred while saving the note.'}), 500 

@@ -1,171 +1,196 @@
-from flask import Blueprint, jsonify, request
-from models.auth import AuthUser
-from bson import ObjectId
-from functools import wraps
-from routes.auth import token_required
+from flask import Blueprint, request, jsonify
+from datetime import datetime
+from utils.auth import token_required
+from database import get_db
+import logging
 
 friends_bp = Blueprint('friends', __name__)
+logger = logging.getLogger(__name__)
 
-@friends_bp.route('/', methods=['GET'])
+@friends_bp.route('/friends', methods=['GET'])
 @token_required
 def get_friends(current_user):
     try:
-        print(f"\nFetching friends for user: {current_user.username}")
-        # Extract IDs from friend objects
-        friend_ids = [friend.id for friend in current_user.friends]
-        print(f"Friend IDs: {[str(id) for id in friend_ids]}")
-        
-        friends = AuthUser.objects(id__in=friend_ids).only('username', 'online')
-        friend_list = [{
-            "id": str(friend.id),
-            "username": friend.username,
-            "online": friend.online
-        } for friend in friends]
-        
-        print(f"Found {len(friend_list)} friends: {friend_list}")
-        return jsonify(friend_list)
+        with get_db() as client:
+            # Get all friendships where the current user is either user1 or user2
+            response = client.table('friendships').select(
+                'id',
+                'user1_id',
+                'user2_id',
+                'status',
+                'created_at',
+                'users!friendships_user1_id_fkey(id, username, email)',
+                'users!friendships_user2_id_fkey(id, username, email)'
+            ).or_(f'user1_id.eq.{current_user.id},user2_id.eq.{current_user.id}').execute()
+            
+            friendships = response.data
+            
+            # Process friendships to get friend information
+            friends = []
+            for friendship in friendships:
+                # Determine which user is the friend (not the current user)
+                friend = None
+                if friendship['user1_id'] == current_user.id:
+                    friend = friendship['users!friendships_user2_id_fkey']
+                else:
+                    friend = friendship['users!friendships_user1_id_fkey']
+                
+                if friend:
+                    friends.append({
+                        'id': friend['id'],
+                        'username': friend['username'],
+                        'email': friend['email'],
+                        'friendship_id': friendship['id'],
+                        'status': friendship['status'],
+                        'created_at': friendship['created_at']
+                    })
+            
+            return jsonify(friends)
+            
     except Exception as e:
-        print(f"Error in get_friends: {str(e)}")
-        return jsonify({"message": str(e)}), 500
+        logger.error(f"Error fetching friends: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@friends_bp.route('/requests', methods=['GET'])
+@friends_bp.route('/friends/requests', methods=['GET'])
 @token_required
 def get_friend_requests(current_user):
     try:
-        pending_requests = []
-        print(f"\nFetching friend requests for user: {current_user.username}")
-        print(f"Total friend requests: {len(current_user.friend_requests)}")
-        
-        for request in current_user.get_pending_requests():
-            print(f"Processing request: {request.to_json()}")
-            from_user = AuthUser.objects(id=request.from_user.id).only('username').first()
-            if from_user:
-                request_data = {
-                    "id": str(request.request_id),
-                    "from": {
-                        "username": from_user.username,
-                        "id": str(from_user.id)
-                    },
-                    "status": request.status,
-                    "created_at": request.created_at.isoformat()
-                }
-                print(f"Adding request to response: {request_data}")
-                pending_requests.append(request_data)
-
-        # Sort by creation date to ensure consistent order
-        pending_requests.sort(key=lambda x: x['created_at'])
-        print(f"Returning {len(pending_requests)} pending requests")
-        return jsonify(pending_requests)
+        with get_db() as client:
+            # Get pending friend requests where current user is the recipient
+            response = client.table('friendships').select(
+                'id',
+                'user1_id',
+                'created_at',
+                'users!friendships_user1_id_fkey(id, username, email)'
+            ).eq('user2_id', current_user.id).eq('status', 'pending').execute()
+            
+            requests = response.data
+            
+            return jsonify([{
+                'id': request['id'],
+                'user': {
+                    'id': request['users!friendships_user1_id_fkey']['id'],
+                    'username': request['users!friendships_user1_id_fkey']['username'],
+                    'email': request['users!friendships_user1_id_fkey']['email']
+                },
+                'created_at': request['created_at']
+            } for request in requests])
+            
     except Exception as e:
-        print(f"Error in get_friend_requests: {str(e)}")
-        return jsonify({"message": str(e)}), 500
+        logger.error(f"Error fetching friend requests: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@friends_bp.route('/request/<username>', methods=['POST'])
+@friends_bp.route('/friends/request', methods=['POST'])
 @token_required
-def send_friend_request(current_user, username):
+def send_friend_request(current_user):
     try:
-        if current_user.username == username:
-            return jsonify({"message": "Cannot send friend request to yourself"}), 400
+        data = request.get_json()
+        friend_email = data.get('email')
 
-        target_user = AuthUser.objects(username=username).first()
-        if not target_user:
-            return jsonify({"message": "User not found"}), 404
+        if not friend_email:
+            return jsonify({'error': 'Email is required'}), 400
 
-        # Check if they're already friends
-        if target_user.id in [friend.id for friend in current_user.friends]:
-            return jsonify({"message": "Already friends with this user"}), 400
+        with get_db() as client:
+            # Check if friend exists
+            friend_response = client.table('users').select('id').eq('email', friend_email).execute()
+            if not friend_response.data:
+                return jsonify({'error': 'User not found'}), 404
 
-        # Check if request already exists
-        existing_request = any(
-            str(req.from_user.id) == str(current_user.id) and req.status == 'pending'
-            for req in target_user.friend_requests
-        )
-        if existing_request:
-            return jsonify({"message": "Friend request already sent"}), 400
+            friend_id = friend_response.data[0]['id']
 
-        # Check if there's a pending request from the target user
-        reverse_request = any(
-            str(req.from_user.id) == str(target_user.id) and req.status == 'pending'
-            for req in current_user.friend_requests
-        )
-        if reverse_request:
-            return jsonify({"message": "This user has already sent you a friend request"}), 400
+            # Check if friendship already exists
+            existing_response = client.table('friendships').select('*').or_(
+                f'user1_id.eq.{current_user.id},user2_id.eq.{current_user.id}'
+            ).or_(
+                f'user1_id.eq.{friend_id},user2_id.eq.{friend_id}'
+            ).execute()
 
-        # Add friend request
-        friend_request = target_user.add_friend_request(current_user)
-        print(f"Created friend request: {friend_request.to_json()}")
+            if existing_response.data:
+                return jsonify({'error': 'Friendship already exists'}), 400
 
-        return jsonify({"message": "Friend request sent successfully"})
+            # Create friend request
+            friendship_data = {
+                'user1_id': current_user.id,
+                'user2_id': friend_id,
+                'status': 'pending',
+                'created_at': datetime.utcnow()
+            }
+
+            response = client.table('friendships').insert(friendship_data).execute()
+            
+            if not response.data:
+                return jsonify({'error': 'Failed to send friend request'}), 500
+
+            return jsonify({
+                'message': 'Friend request sent successfully',
+                'friendship': response.data[0]
+            }), 201
+
     except Exception as e:
-        print(f"Error in send_friend_request: {str(e)}")
-        return jsonify({"message": str(e)}), 500
+        logger.error(f"Error sending friend request: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@friends_bp.route('/accept/<request_id>', methods=['POST'])
+@friends_bp.route('/friends/request/<request_id>', methods=['PUT'])
 @token_required
-def accept_friend_request(current_user, request_id):
+def respond_to_friend_request(current_user, request_id):
     try:
-        # Clean the request_id by removing any trailing slashes
-        request_id = request_id.rstrip('/')
-        print(f"Looking for friend request with ID: {request_id}")
-        print(f"Current user has {len(current_user.friend_requests)} friend requests")
-        
-        # Find the request
-        request = current_user.get_friend_request_by_id(request_id)
-        if not request:
-            print(f"No friend request found with ID: {request_id}")
-            print(f"Available request IDs: {[str(req.request_id) for req in current_user.friend_requests]}")
-            return jsonify({"message": "Request not found"}), 404
+        data = request.get_json()
+        action = data.get('action')  # 'accept' or 'reject'
 
-        print(f"Found friend request: {request.to_json()}")
-        
-        # Update request status and add to friends lists
-        request.status = "accepted"
-        if request.from_user not in current_user.friends:
-            current_user.friends.append(request.from_user)
-        current_user.save()
-        
-        # Add current user to the requester's friends list
-        from_user = AuthUser.objects(id=request.from_user.id).first()
-        if from_user:
-            if current_user not in from_user.friends:
-                from_user.friends.append(current_user)
-                from_user.save()
+        if action not in ['accept', 'reject']:
+            return jsonify({'error': 'Invalid action'}), 400
 
-        return jsonify({"message": "Friend request accepted"})
+        with get_db() as client:
+            # Verify request exists and is pending
+            request_response = client.table('friendships').select('*').eq('id', request_id).eq('user2_id', current_user.id).eq('status', 'pending').execute()
+            
+            if not request_response.data:
+                return jsonify({'error': 'Friend request not found'}), 404
+
+            if action == 'accept':
+                # Update friendship status to accepted
+                response = client.table('friendships').update({
+                    'status': 'accepted',
+                    'updated_at': datetime.utcnow()
+                }).eq('id', request_id).execute()
+            else:
+                # Delete the friendship request
+                response = client.table('friendships').delete().eq('id', request_id).execute()
+
+            if not response.data:
+                return jsonify({'error': f'Failed to {action} friend request'}), 500
+
+            return jsonify({
+                'message': f'Friend request {action}ed successfully'
+            })
+
     except Exception as e:
-        print(f"Error in accept_friend_request: {str(e)}")
-        return jsonify({"message": str(e)}), 500
+        logger.error(f"Error responding to friend request: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@friends_bp.route('/reject/<request_id>', methods=['POST'])
+@friends_bp.route('/friends/<friendship_id>', methods=['DELETE'])
 @token_required
-def reject_friend_request(current_user, request_id):
+def remove_friend(current_user, friendship_id):
     try:
-        # Find the request
-        request = current_user.get_friend_request_by_id(request_id)
-        if not request:
-            return jsonify({"message": "Request not found"}), 404
+        with get_db() as client:
+            # Verify friendship exists and involves current user
+            friendship_response = client.table('friendships').select('*').eq('id', friendship_id).or_(
+                f'user1_id.eq.{current_user.id},user2_id.eq.{current_user.id}'
+            ).execute()
+            
+            if not friendship_response.data:
+                return jsonify({'error': 'Friendship not found'}), 404
 
-        # Update request status
-        request.status = "rejected"
-        current_user.save()
+            # Delete the friendship
+            response = client.table('friendships').delete().eq('id', friendship_id).execute()
+            
+            if not response.data:
+                return jsonify({'error': 'Failed to remove friend'}), 500
 
-        return jsonify({"message": "Friend request rejected"})
+            return jsonify({
+                'message': 'Friend removed successfully'
+            })
+
     except Exception as e:
-        print(f"Error in reject_friend_request: {str(e)}")
-        return jsonify({"message": str(e)}), 500
-
-@friends_bp.route('/<friend_id>', methods=['DELETE'])
-@token_required
-def remove_friend(current_user, friend_id):
-    try:
-        # Remove from both users' friend lists
-        current_user.update(
-            pull__friends=ObjectId(friend_id)
-        )
-        AuthUser.objects(id=friend_id).update_one(
-            pull__friends=current_user.id
-        )
-
-        return jsonify({"message": "Friend removed successfully"})
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500 
+        logger.error(f"Error removing friend: {str(e)}")
+        return jsonify({'error': str(e)}), 500 
