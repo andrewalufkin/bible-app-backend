@@ -12,3 +12,4 @@ requests==2.31.0
 alembic==1.13.1
 psycopg2-binary==2.9.9
 anthropic==0.35.0
+jwt==4.5.0
