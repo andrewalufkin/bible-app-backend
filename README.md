@@ -9,7 +9,6 @@ This is the backend for the Bible App, providing API services for Bible verses, 
 Create a `.env` file in the backend directory with the following variables:
 
 ```
-MONGODB_URI=your-mongodb-uri
 JWT_SECRET=your-jwt-secret
 ANTHROPIC_API_KEY=your-anthropic-api-key
 PORT=5001
