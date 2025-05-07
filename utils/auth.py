@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key')  # In production, use a proper secret key
 JWT_EXPIRATION_HOURS = 24
 
+# !!! TEMPORARY DEBUG LOG - REMOVE AFTER USE !!!
+# print(f"[AUTH DEBUG] JWT_SECRET being used by backend: {JWT_SECRET}") # REMOVED FOR SECURITY
+# !!! END TEMPORARY DEBUG LOG !!!
+
 def hash_password(password):
     """Hash a password using bcrypt"""
     salt = bcrypt.gensalt()
@@ -57,9 +61,10 @@ def token_required(f):
             return jsonify({'error': 'Token is required'}), 401
 
         try:
-            data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            current_user_id = data['user_id']
-            logger.info(f"Token successfully decoded for user_id: {current_user_id}")
+            logger.info(f"[AUTH DEBUG] Attempting to decode token: {token[:15]}... with secret: {JWT_SECRET[:10]}... (and on file load: {os.getenv('JWT_SECRET')[:10]}...)")
+            data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], audience='authenticated')
+            current_user_id = data['sub']
+            logger.info(f"Token successfully decoded for user_id (from sub claim): {current_user_id}")
         except jwt.ExpiredSignatureError:
             logger.warning("Token has expired.")
             return jsonify({'error': 'Token has expired'}), 401
@@ -91,8 +96,8 @@ def premium_required(f):
             return jsonify({'error': 'Token is required'}), 401
 
         try:
-            data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            current_user_id = data['user_id']
+            data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], audience='authenticated')
+            current_user_id = data['sub']
             
             # Check if user is premium
             from database import get_db_connection

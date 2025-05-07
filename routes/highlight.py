@@ -1,10 +1,13 @@
 # backend/routes/highlight.py
 from flask import Blueprint, request, jsonify, g
 from sqlalchemy.orm import Session
+from sqlalchemy import and_ # Added for complex queries
 from database import get_db_session # Assuming a session getter for Flask context
 from models import Highlight, User # Import models directly
-from utils.auth import login_required # Assuming a decorator for protected routes
+# from utils.auth import login_required
+from utils.auth import token_required # Corrected import name
 import logging
+import uuid # Import the uuid module
 
 logger = logging.getLogger(__name__)
 
@@ -14,70 +17,195 @@ highlight_bp = Blueprint('highlight_bp', __name__)
 # We'll parse JSON from the request body
 
 @highlight_bp.route("/api/highlights", methods=['POST'])
-@login_required # Protect the route
-def create_highlight():
-    """Creates a new highlight for the current user."""
+# @login_required
+@token_required # Use the correct decorator name
+def create_highlight(current_user_id_str): # Renamed to indicate it's a string
+    """
+    Creates or updates highlights for a verse based on a new highlight submission.
+    Implements a "paint over" logic: new highlights can split, truncate, or
+    overwrite existing highlights. Returns the complete, updated set of
+    non-overlapping highlight segments for the affected verse.
+    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
-    required_fields = ['book', 'chapter', 'verse', 'start_offset', 'end_offset']
+    # Convert current_user_id_str to UUID object
+    try:
+        current_user_id = uuid.UUID(current_user_id_str)
+    except ValueError:
+        logger.error(f"Invalid UUID format for user_id: {current_user_id_str}")
+        return jsonify({"error": "Invalid user identifier format"}), 400
+
+    required_fields = ['book', 'chapter', 'verse', 'start_offset', 'end_offset', 'color']
     if not all(field in data for field in required_fields):
         return jsonify({"error": "Missing required fields"}), 400
-
-    # Get user from g, assuming login_required adds it
-    current_user_id = getattr(g, 'user_id', None)
-    if not current_user_id:
-         return jsonify({"error": "Authentication required"}), 401
 
     book = data['book']
     chapter = data['chapter']
     verse = data['verse']
-    start_offset = data['start_offset']
-    end_offset = data['end_offset']
-    color = data.get('color', '#FFFF00') # Default color if not provided
+    new_start_offset = data['start_offset']
+    new_end_offset = data['end_offset']
+    new_color = data['color']
 
-    # Basic validation
-    if not isinstance(start_offset, int) or not isinstance(end_offset, int) or \
-       start_offset < 0 or end_offset <= start_offset:
+    if not all(isinstance(val, str) for val in [book, new_color]):
+        return jsonify({"error": "Book and color must be strings"}), 400
+    if not all(isinstance(val, int) for val in [chapter, verse, new_start_offset, new_end_offset]):
+        return jsonify({"error": "Chapter, verse, start_offset, and end_offset must be integers"}), 400
+
+    if new_start_offset < 0 or new_end_offset <= new_start_offset:
         return jsonify({"error": "Invalid start or end offset"}), 400
 
-    # More validation could be added here
-
     try:
-        with get_db_session() as db: # Use the session context manager
-            new_highlight = Highlight(
-                user_id=current_user_id,
-                book=book,
-                chapter=chapter,
-                verse=verse,
-                start_offset=start_offset,
-                end_offset=end_offset,
-                color=color
-            )
-            db.add(new_highlight)
-            db.commit()
-            db.refresh(new_highlight)
+        with get_db_session() as db:
+            existing_highlights = db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).order_by(Highlight.start_offset).all()
+
+            final_segments = []
+
+            # 1. Calculate remaining parts of existing highlights
+            for ex_hl in existing_highlights:
+                ex_start, ex_end, ex_color = ex_hl.start_offset, ex_hl.end_offset, ex_hl.color
+
+                # If existing highlight is entirely to the left of the new one
+                if ex_end <= new_start_offset:
+                    final_segments.append({'start': ex_start, 'end': ex_end, 'color': ex_color})
+                # If existing highlight is entirely to the right of the new one
+                elif ex_start >= new_end_offset:
+                    final_segments.append({'start': ex_start, 'end': ex_end, 'color': ex_color})
+                # Else, there is an overlap
+                else:
+                    # Part of existing highlight to the left of the new highlight
+                    if ex_start < new_start_offset:
+                        final_segments.append({'start': ex_start, 'end': new_start_offset, 'color': ex_color})
+                    # Part of existing highlight to the right of the new highlight
+                    if ex_end > new_end_offset:
+                        final_segments.append({'start': new_end_offset, 'end': ex_end, 'color': ex_color})
             
-            # Return the created object's details
-            response_data = {
-                "id": new_highlight.id,
-                "user_id": new_highlight.user_id,
-                "book": new_highlight.book,
-                "chapter": new_highlight.chapter,
-                "verse": new_highlight.verse,
-                "start_offset": new_highlight.start_offset,
-                "end_offset": new_highlight.end_offset,
-                "color": new_highlight.color,
-                # Add created_at/updated_at if needed, converting to string
-                # "created_at": new_highlight.created_at.isoformat() if new_highlight.created_at else None,
-            }
-            return jsonify(response_data), 201 # HTTP 201 Created
+            # 2. Add the new highlight itself
+            final_segments.append({'start': new_start_offset, 'end': new_end_offset, 'color': new_color})
+
+            # 3. Sort and Merge segments
+            # Sort by start offset, then by end offset
+            final_segments.sort(key=lambda s: (s['start'], s['end']))
+
+            merged_segments = []
+            if not final_segments:
+                # If there are no segments (e.g. first highlight, or new highlight covered all old ones)
+                # and the new highlight itself was valid.
+                # This case is handled by the loop below if final_segments has the new highlight.
+                # If final_segments is truly empty, merged_segments remains empty.
+                pass
+
+
+            for seg in final_segments:
+                # Skip zero-length or invalid segments that might have been created
+                if seg['start'] >= seg['end']:
+                    continue
+
+                if not merged_segments or seg['color'] != merged_segments[-1]['color'] or seg['start'] > merged_segments[-1]['end']:
+                    # If merged_segments is empty, or current segment has a different color,
+                    # or current segment does not touch/overlap the last merged segment,
+                    # then add it as a new segment.
+                    merged_segments.append(seg.copy()) # Use copy to avoid modifying original in final_segments
+                else:
+                    # Merge with the last segment (it has the same color and touches or overlaps)
+                    merged_segments[-1]['end'] = max(merged_segments[-1]['end'], seg['end'])
+            
+            # 4. Database Update
+            # Delete old highlights for this verse for this user
+            db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).delete(synchronize_session=False) # synchronize_session=False is typical for bulk deletes
+
+            # Add new merged segments
+            new_db_highlights = []
+            for seg_data in merged_segments:
+                new_hl = Highlight(
+                    user_id=current_user_id,
+                    book=book,
+                    chapter=chapter,
+                    verse=verse,
+                    start_offset=seg_data['start'],
+                    end_offset=seg_data['end'],
+                    color=seg_data['color']
+                )
+                db.add(new_hl)
+                new_db_highlights.append(new_hl)
+            
+            db.commit() # Commit changes: deletions and additions
+
+            # Refresh objects to get IDs and timestamps
+            # Instead of refreshing (which might be tricky with new_db_highlights if they weren't flushed for IDs),
+            # it's safer to re-query. But for performance, if IDs are populated after add and before commit,
+            # we might not need a full re-query. SQLAlchemy populates PKs on flush, which happens before commit.
+            # However, timestamps like created_at, updated_at with server_default/onupdate might need refresh.
+            # Let's re-fetch for safety and to ensure all fields are current.
+
+            # 5. Fetch and Return all highlights for the verse
+            final_verse_highlights = db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).order_by(Highlight.start_offset).all()
+
+            response_data = [{
+                "id": hl.id,
+                "user_id": hl.user_id,
+                "book": hl.book,
+                "chapter": hl.chapter,
+                "verse": hl.verse,
+                "start_offset": hl.start_offset,
+                "end_offset": hl.end_offset,
+                "color": hl.color,
+                "created_at": hl.created_at.isoformat() if hl.created_at else None,
+                "updated_at": hl.updated_at.isoformat() if hl.updated_at else None,
+            } for hl in final_verse_highlights]
+            
+            return jsonify(response_data), 200
 
     except Exception as e:
-        logger.error(f"Error creating highlight: {str(e)}")
-        # Consider rolling back the transaction if using a session context manager that doesn't auto-rollback
-        # db.rollback() 
-        return jsonify({"error": "Failed to create highlight"}), 500
+        db.rollback() # Rollback in case of error during transaction
+        logger.error(f"Error processing highlight for verse {book} {chapter}:{verse}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Failed to process highlight"}), 500
 
-# We will add GET and DELETE endpoints later 
+# We will add GET and DELETE endpoints later
+
+@highlight_bp.route("/api/highlights/chapter/<string:book_name>/<int:chapter_number>", methods=['GET'])
+@token_required
+def get_highlights_by_chapter(current_user_id, book_name, chapter_number):
+    """Fetches all highlights for a given book and chapter for the current user."""
+    try:
+        with get_db_session() as db:
+            highlights = db.query(Highlight).filter_by(
+                user_id=current_user_id,
+                book=book_name,
+                chapter=chapter_number
+            ).order_by(Highlight.verse, Highlight.start_offset).all()
+
+            results = [{
+                "id": h.id,
+                "user_id": h.user_id,
+                "book": h.book,
+                "chapter": h.chapter,
+                "verse": h.verse,
+                "start_offset": h.start_offset,
+                "end_offset": h.end_offset,
+                "color": h.color,
+                "created_at": h.created_at.isoformat() if h.created_at else None,
+                "updated_at": h.updated_at.isoformat() if h.updated_at else None
+            } for h in highlights]
+            
+            return jsonify(results), 200
+            
+    except Exception as e:
+        logger.error(f"Error fetching highlights for {book_name} chapter {chapter_number}: {str(e)}")
+        return jsonify({"error": "Failed to fetch highlights"}), 500 

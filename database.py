@@ -1,4 +1,5 @@
 from supabase import create_client
+from supabase.client import ClientOptions
 from dotenv import load_dotenv
 import os
 import logging
@@ -39,7 +40,6 @@ class SupabaseClient:
         # Defer initialization to first access or explicit call
 
     def _get_or_init_client(self):
-        # Initialize only if not already initialized
         if self._client is None:
             try:
                 supabase_url = os.getenv('SUPABASE_URL')
@@ -51,12 +51,15 @@ class SupabaseClient:
                     raise ValueError("SUPABASE_SERVICE_KEY appears invalid (use service_role key)")
                 
                 logger.info("Initializing Supabase client...")
+                
+                # Initialize client without explicit options, relying on environment for proxy settings
                 self._client = create_client(supabase_url, supabase_key)
+                
                 logger.info("Successfully initialized Supabase client")
             except Exception as e:
                 logger.error(f"Error initializing Supabase client: {str(e)}")
-                self._client = None # Ensure it's None on failure
-                raise # Re-raise the exception
+                self._client = None
+                raise
         return self._client
 
     async def init_pg_pool(self):
