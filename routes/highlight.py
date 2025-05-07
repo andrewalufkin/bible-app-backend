@@ -183,13 +183,17 @@ def create_highlight(current_user_id_str): # Renamed to indicate it's a string
 @token_required
 def get_highlights_by_chapter(current_user_id, book_name, chapter_number):
     """Fetches all highlights for a given book and chapter for the current user."""
+    logger.info(f"Attempting to fetch highlights for user: {current_user_id}, book: {book_name}, chapter: {chapter_number}")
     try:
+        logger.debug("Attempting to get DB session.")
         with get_db_session() as db:
+            logger.debug(f"DB session acquired. Querying highlights for user_id: {current_user_id}, book: {book_name}, chapter: {chapter_number}")
             highlights = db.query(Highlight).filter_by(
                 user_id=current_user_id,
                 book=book_name,
                 chapter=chapter_number
             ).order_by(Highlight.verse, Highlight.start_offset).all()
+            logger.info(f"Successfully fetched {len(highlights)} highlights from DB.")
 
             results = [{
                 "id": h.id,
@@ -204,8 +208,9 @@ def get_highlights_by_chapter(current_user_id, book_name, chapter_number):
                 "updated_at": h.updated_at.isoformat() if h.updated_at else None
             } for h in highlights]
             
+            logger.debug("Successfully serialized highlights results.")
             return jsonify(results), 200
             
     except Exception as e:
-        logger.error(f"Error fetching highlights for {book_name} chapter {chapter_number}: {str(e)}")
+        logger.error(f"Error fetching highlights for {book_name} chapter {chapter_number}. User ID: {current_user_id}. Exception: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch highlights"}), 500 
