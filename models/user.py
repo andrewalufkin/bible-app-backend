@@ -28,7 +28,8 @@ class User(Base):
     # updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    highlights = relationship("Highlight", back_populates="user")
+    highlights = relationship("Highlight", back_populates="user", cascade="all, delete-orphan")
+    bookmarks = relationship("Bookmark", back_populates="user", cascade="all, delete-orphan")
 
     # Example for friends relationship (many-to-many)
     # We need to define how this works. The Mongo `friends = ListField(ReferenceField('User'))` implies a direct list.

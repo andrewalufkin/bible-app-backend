@@ -214,3 +214,129 @@ def get_highlights_by_chapter(current_user_id, book_name, chapter_number):
     except Exception as e:
         logger.error(f"Error fetching highlights for {book_name} chapter {chapter_number}. User ID: {current_user_id}. Exception: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch highlights"}), 500 
+
+@highlight_bp.route("/api/highlights/range", methods=['DELETE'])
+@token_required
+def delete_highlights_in_range(current_user_id_str):
+    """
+    Deletes highlights within a specified range for a verse.
+    Recalculates segments similar to create_highlight, but removes the specified range.
+    Returns the complete, updated set of non-overlapping highlight segments for the affected verse.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    try:
+        current_user_id = uuid.UUID(current_user_id_str)
+    except ValueError:
+        logger.error(f"Invalid UUID format for user_id: {current_user_id_str}")
+        return jsonify({"error": "Invalid user identifier format"}), 400
+
+    required_fields = ['book', 'chapter', 'verse', 'start_offset', 'end_offset']
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields for deletion"}), 400
+
+    book = data['book']
+    chapter = data['chapter']
+    verse = data['verse']
+    del_start_offset = data['start_offset']
+    del_end_offset = data['end_offset']
+
+    if not isinstance(book, str):
+        return jsonify({"error": "Book must be a string"}), 400
+    if not all(isinstance(val, int) for val in [chapter, verse, del_start_offset, del_end_offset]):
+        return jsonify({"error": "Chapter, verse, start_offset, and end_offset must be integers"}), 400
+
+    if del_start_offset < 0 or del_end_offset <= del_start_offset:
+        return jsonify({"error": "Invalid start or end offset for deletion range"}), 400
+
+    try:
+        with get_db_session() as db:
+            existing_highlights = db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).order_by(Highlight.start_offset).all()
+
+            final_segments = []
+
+            # Calculate remaining parts of existing highlights after deletion range is applied
+            for ex_hl in existing_highlights:
+                ex_start, ex_end, ex_color = ex_hl.start_offset, ex_hl.end_offset, ex_hl.color
+
+                # Case 1: Existing highlight is entirely to the left of the deletion range
+                if ex_end <= del_start_offset:
+                    final_segments.append({'start': ex_start, 'end': ex_end, 'color': ex_color})
+                # Case 2: Existing highlight is entirely to the right of the deletion range
+                elif ex_start >= del_end_offset:
+                    final_segments.append({'start': ex_start, 'end': ex_end, 'color': ex_color})
+                # Case 3: Overlap exists
+                else:
+                    # Part of existing highlight to the left of the deletion range
+                    if ex_start < del_start_offset:
+                        final_segments.append({'start': ex_start, 'end': del_start_offset, 'color': ex_color})
+                    # Part of existing highlight to the right of the deletion range
+                    if ex_end > del_end_offset:
+                        final_segments.append({'start': del_end_offset, 'end': ex_end, 'color': ex_color})
+            
+            # Sort and Merge segments (same logic as create_highlight, but without adding a new highlight segment)
+            final_segments.sort(key=lambda s: (s['start'], s['end']))
+
+            merged_segments = []
+            for seg in final_segments:
+                if seg['start'] >= seg['end']: # Skip zero-length or invalid segments
+                    continue
+                if not merged_segments or seg['color'] != merged_segments[-1]['color'] or seg['start'] > merged_segments[-1]['end']:
+                    merged_segments.append(seg.copy())
+                else:
+                    merged_segments[-1]['end'] = max(merged_segments[-1]['end'], seg['end'])
+            
+            # Database Update: Delete old highlights for this verse, then add new merged segments
+            db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).delete(synchronize_session=False)
+
+            new_db_highlights = []
+            for seg_data in merged_segments:
+                new_hl = Highlight(
+                    user_id=current_user_id,
+                    book=book,
+                    chapter=chapter,
+                    verse=verse,
+                    start_offset=seg_data['start'],
+                    end_offset=seg_data['end'],
+                    color=seg_data['color']
+                )
+                db.add(new_hl)
+                new_db_highlights.append(new_hl)
+            
+            db.commit()
+
+            # Fetch and Return all highlights for the verse
+            final_verse_highlights = db.query(Highlight).filter(
+                Highlight.user_id == current_user_id,
+                Highlight.book == book,
+                Highlight.chapter == chapter,
+                Highlight.verse == verse
+            ).order_by(Highlight.start_offset).all()
+
+            response_data = [{
+                "id": hl.id, "user_id": hl.user_id, "book": hl.book,
+                "chapter": hl.chapter, "verse": hl.verse,
+                "start_offset": hl.start_offset, "end_offset": hl.end_offset,
+                "color": hl.color,
+                "created_at": hl.created_at.isoformat() if hl.created_at else None,
+                "updated_at": hl.updated_at.isoformat() if hl.updated_at else None,
+            } for hl in final_verse_highlights]
+            
+            return jsonify(response_data), 200
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting highlights in range for verse {book} {chapter}:{verse}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Failed to delete highlights in range"}), 500 

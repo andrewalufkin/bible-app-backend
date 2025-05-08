@@ -6,6 +6,7 @@ from routes.auth import auth_bp
 from routes.friends import friends_bp
 from routes.notes import notes_bp
 from routes.highlight import highlight_bp
+from routes.bookmarks_routes import bookmarks_bp
 from database import get_supabase, get_db
 from dotenv import load_dotenv
 import os
@@ -70,6 +71,7 @@ app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(friends_bp, url_prefix='/api/friends')
 app.register_blueprint(notes_bp, url_prefix='/api/notes')
 app.register_blueprint(highlight_bp)
+app.register_blueprint(bookmarks_bp)
 
 # Request timeout middleware
 def timeout_handler(seconds):
